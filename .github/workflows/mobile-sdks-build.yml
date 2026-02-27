@@ -1,0 +1,175 @@
+name: Flutter & React Native Build
+
+on:
+  push:
+    paths:
+      - 'sdk/runanywhere-flutter/**'
+      - 'sdk/runanywhere-react-native/**'
+      - '.github/workflows/mobile-sdks-build.yml'
+    branches: [main]
+  pull_request:
+    paths:
+      - 'sdk/runanywhere-flutter/**'
+      - 'sdk/runanywhere-react-native/**'
+      - '.github/workflows/mobile-sdks-build.yml'
+  workflow_dispatch:
+
+jobs:
+  flutter:
+    name: Flutter SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.27.x'
+          channel: 'stable'
+          cache: true
+
+      - name: Install Melos
+        run: dart pub global activate melos
+
+      - name: Bootstrap
+        id: bootstrap
+        working-directory: sdk/runanywhere-flutter
+        run: melos bootstrap
+
+      - name: Analyze
+        id: analyze
+        working-directory: sdk/runanywhere-flutter
+        run: melos run analyze
+
+      - name: Format check
+        id: format
+        working-directory: sdk/runanywhere-flutter
+        run: |
+          melos run format
+          # Check if formatting changed any files
+          if [ -n "$(git diff --name-only)" ]; then
+            echo "::warning::Some files are not properly formatted"
+            git diff --name-only
+          fi
+
+      - name: Run tests
+        id: tests
+        working-directory: sdk/runanywhere-flutter
+        run: melos run test
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Flutter SDK Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Step | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          icon() { if [ "$1" = "success" ]; then echo "pass"; else echo "FAIL"; fi; }
+
+          echo "| Bootstrap | $(icon ${{ steps.bootstrap.outcome }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Analyze | $(icon ${{ steps.analyze.outcome }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Format | $(icon ${{ steps.format.outcome }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tests | $(icon ${{ steps.tests.outcome }}) |" >> $GITHUB_STEP_SUMMARY
+
+          for s in "${{ steps.bootstrap.outcome }}" "${{ steps.analyze.outcome }}" "${{ steps.tests.outcome }}"; do
+            if [ "$s" = "failure" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**One or more steps failed.**" >> $GITHUB_STEP_SUMMARY
+              exit 1
+            fi
+          done
+
+  react-native:
+    name: React Native SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Enable Corepack (Yarn)
+        run: corepack enable
+
+      - name: Install dependencies
+        id: install
+        working-directory: sdk/runanywhere-react-native
+        run: yarn install --immutable
+
+      - name: Typecheck
+        id: typecheck
+        working-directory: sdk/runanywhere-react-native
+        run: yarn typecheck
+
+      - name: Lint
+        id: lint
+        working-directory: sdk/runanywhere-react-native
+        run: yarn lint
+
+      - name: Build
+        id: build
+        working-directory: sdk/runanywhere-react-native
+        run: yarn build
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## React Native SDK Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Step | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          icon() { if [ "$1" = "success" ]; then echo "pass"; else echo "FAIL"; fi; }
+
+          echo "| Install | $(icon ${{ steps.install.outcome }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Typecheck | $(icon ${{ steps.typecheck.outcome }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Lint | $(icon ${{ steps.lint.outcome }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build | $(icon ${{ steps.build.outcome }}) |" >> $GITHUB_STEP_SUMMARY
+
+          for s in "${{ steps.install.outcome }}" "${{ steps.typecheck.outcome }}" "${{ steps.build.outcome }}"; do
+            if [ "$s" = "failure" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**One or more steps failed.**" >> $GITHUB_STEP_SUMMARY
+              exit 1
+            fi
+          done
+
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [flutter, react-native]
+    steps:
+      - name: Check results
+        run: |
+          echo "## Mobile SDKs Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| SDK | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+
+          FL="${{ needs.flutter.result }}"
+          RN="${{ needs.react-native.result }}"
+
+          icon() { if [ "$1" = "success" ]; then echo "pass"; elif [ "$1" = "skipped" ]; then echo "skip"; else echo "FAIL"; fi; }
+
+          echo "| Flutter | $(icon $FL) |" >> $GITHUB_STEP_SUMMARY
+          echo "| React Native | $(icon $RN) |" >> $GITHUB_STEP_SUMMARY
+
+          FAILED=0
+          for s in "$FL" "$RN"; do
+            if [ "$s" = "failure" ] || [ "$s" = "cancelled" ]; then FAILED=1; fi
+          done
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**One or more SDKs failed.**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "All SDKs passed." >> $GITHUB_STEP_SUMMARY
+          fi

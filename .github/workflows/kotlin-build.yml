@@ -1,0 +1,93 @@
+name: Kotlin Multiplatform Build
+
+on:
+  push:
+    paths:
+      - 'sdk/runanywhere-kotlin/**'
+      - '.github/workflows/kotlin-build.yml'
+    branches: [main]
+  pull_request:
+    paths:
+      - 'sdk/runanywhere-kotlin/**'
+      - '.github/workflows/kotlin-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Build JVM JAR
+        id: jvm
+        working-directory: sdk/runanywhere-kotlin
+        run: ./gradlew jvmJar -Prunanywhere.testLocal=false --no-daemon
+
+      - name: Build Android AAR (Debug)
+        id: android-debug
+        working-directory: sdk/runanywhere-kotlin
+        run: ./gradlew assembleDebug -Prunanywhere.testLocal=false --no-daemon
+
+      - name: Build Android AAR (Release)
+        id: android-release
+        working-directory: sdk/runanywhere-kotlin
+        run: ./gradlew assembleRelease -Prunanywhere.testLocal=false --no-daemon
+
+      - name: Build backend modules
+        id: modules
+        working-directory: sdk/runanywhere-kotlin
+        run: |
+          ./gradlew :modules:runanywhere-core-llamacpp:assembleDebug -Prunanywhere.testLocal=false --no-daemon
+          ./gradlew :modules:runanywhere-core-onnx:assembleDebug -Prunanywhere.testLocal=false --no-daemon
+          ./gradlew :modules:runanywhere-core-rag:assembleDebug -Prunanywhere.testLocal=false --no-daemon
+
+      - name: Run tests
+        id: tests
+        working-directory: sdk/runanywhere-kotlin
+        run: ./gradlew test -Prunanywhere.testLocal=false --no-daemon
+
+      - name: Publish to Maven Local (verify)
+        id: publish
+        working-directory: sdk/runanywhere-kotlin
+        run: ./gradlew publishToMavenLocal -Prunanywhere.testLocal=false --no-daemon
+
+      - name: Verify build outputs
+        run: |
+          echo "## Build Outputs" >> $GITHUB_STEP_SUMMARY
+
+          JVM_JAR=$(find sdk/runanywhere-kotlin/build/libs -name "*.jar" 2>/dev/null | head -1)
+          AAR_DEBUG=$(find sdk/runanywhere-kotlin/build/outputs/aar -name "*debug*" 2>/dev/null | head -1)
+          AAR_RELEASE=$(find sdk/runanywhere-kotlin/build/outputs/aar -name "*release*" 2>/dev/null | head -1)
+
+          echo "| Artifact | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          check() {
+            if [ -n "$1" ] && [ -f "$1" ]; then
+              SIZE=$(du -h "$1" | cut -f1)
+              echo "| $2 | pass ($SIZE) |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| $2 | MISSING |" >> $GITHUB_STEP_SUMMARY
+              return 1
+            fi
+          }
+
+          FAILED=0
+          check "$JVM_JAR" "JVM JAR" || FAILED=1
+          check "$AAR_DEBUG" "Android AAR (Debug)" || FAILED=1
+          check "$AAR_RELEASE" "Android AAR (Release)" || FAILED=1
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Some artifacts are missing.**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
