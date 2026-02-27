@@ -1,0 +1,152 @@
+name: Web SDK Build
+
+on:
+  push:
+    paths:
+      - 'sdk/runanywhere-web/**'
+      - 'sdk/runanywhere-commons/**'
+      - '.github/workflows/web-build.yml'
+    branches: [main]
+  pull_request:
+    paths:
+      - 'sdk/runanywhere-web/**'
+      - 'sdk/runanywhere-commons/**'
+      - '.github/workflows/web-build.yml'
+  workflow_dispatch:
+
+env:
+  EMSDK_VERSION: "3.1.51"
+
+jobs:
+  typescript:
+    name: TypeScript Build & Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: sdk/runanywhere-web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: sdk/runanywhere-web
+        run: npm ci
+
+      - name: Typecheck
+        id: typecheck
+        working-directory: sdk/runanywhere-web
+        run: npm run typecheck
+
+      - name: Build TypeScript
+        id: build-ts
+        working-directory: sdk/runanywhere-web
+        run: npm run build:ts
+
+      - name: Lint
+        id: lint
+        working-directory: sdk/runanywhere-web
+        run: npm run lint
+
+      - name: Verify outputs
+        working-directory: sdk/runanywhere-web
+        run: |
+          echo "## TypeScript Build Outputs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          for pkg in packages/core packages/llamacpp packages/onnx; do
+            if [ -d "$pkg/dist" ]; then
+              COUNT=$(find "$pkg/dist" -name "*.js" -o -name "*.d.ts" | wc -l)
+              echo "- **$pkg/dist/**: $COUNT files" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- **$pkg/dist/**: MISSING" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+  wasm:
+    name: WASM Build (LlamaCPP)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+
+      - name: Install dependencies
+        working-directory: sdk/runanywhere-web
+        run: npm ci
+
+      - name: Build WASM (LlamaCPP backend)
+        id: wasm-build
+        working-directory: sdk/runanywhere-web
+        run: ./scripts/build-web.sh --build-wasm --llamacpp
+
+      - name: Verify WASM output
+        working-directory: sdk/runanywhere-web
+        run: |
+          echo "## WASM Build Outputs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          FAILED=0
+          for f in packages/llamacpp/wasm/racommons-llamacpp.wasm packages/llamacpp/wasm/racommons-llamacpp.js; do
+            if [ -f "$f" ]; then
+              SIZE=$(du -h "$f" | cut -f1)
+              echo "- **$f**: $SIZE" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- **$f**: MISSING" >> $GITHUB_STEP_SUMMARY
+              FAILED=1
+            fi
+          done
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**WASM artifacts missing.**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [typescript, wasm]
+    steps:
+      - name: Check results
+        run: |
+          echo "## Web SDK Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+
+          TS="${{ needs.typescript.result }}"
+          WASM="${{ needs.wasm.result }}"
+
+          icon() { if [ "$1" = "success" ]; then echo "pass"; elif [ "$1" = "skipped" ]; then echo "skip"; else echo "FAIL"; fi; }
+
+          echo "| TypeScript Build & Lint | $(icon $TS) |" >> $GITHUB_STEP_SUMMARY
+          echo "| WASM Build (LlamaCPP) | $(icon $WASM) |" >> $GITHUB_STEP_SUMMARY
+
+          FAILED=0
+          for s in "$TS" "$WASM"; do
+            if [ "$s" = "failure" ] || [ "$s" = "cancelled" ]; then FAILED=1; fi
+          done
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**One or more jobs failed.**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "All jobs passed." >> $GITHUB_STEP_SUMMARY
+          fi

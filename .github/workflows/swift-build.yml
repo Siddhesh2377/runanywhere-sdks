@@ -1,0 +1,88 @@
+name: Swift SDK Build
+
+on:
+  push:
+    paths:
+      - 'sdk/runanywhere-swift/**'
+      - 'Package.swift'
+      - 'Sources/**'
+      - 'Tests/**'
+      - '.github/workflows/swift-build.yml'
+    branches: [main]
+  pull_request:
+    paths:
+      - 'sdk/runanywhere-swift/**'
+      - 'Package.swift'
+      - 'Sources/**'
+      - 'Tests/**'
+      - '.github/workflows/swift-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Xcode
+        run: |
+          XCODE_PATH="/Applications/Xcode_15.4.app"
+          if [ ! -d "$XCODE_PATH" ]; then
+            XCODE_PATH="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
+          fi
+          sudo xcode-select -s "$XCODE_PATH"
+          echo "Using Xcode: $(xcodebuild -version | head -1)"
+          echo "Swift: $(swift --version | head -1)"
+
+      - name: Setup remote XCFrameworks
+        working-directory: sdk/runanywhere-swift
+        run: |
+          if [ -f "./scripts/build-swift.sh" ]; then
+            ./scripts/build-swift.sh --remote
+          else
+            echo "No build-swift.sh found, attempting direct swift build"
+          fi
+
+      - name: Swift Build (macOS)
+        id: swift-build
+        run: swift build
+
+      - name: Swift Test
+        id: swift-test
+        run: swift test
+
+      - name: Build for iOS Simulator
+        id: ios-build
+        run: |
+          xcodebuild build \
+            -scheme RunAnywhereSDK \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            ONLY_ACTIVE_ARCH=YES \
+            2>&1 | tail -50
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Swift SDK Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Step | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          icon() { if [ "$1" = "success" ]; then echo "pass"; else echo "FAIL"; fi; }
+
+          echo "| swift build (macOS) | $(icon ${{ steps.swift-build.outcome }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| swift test | $(icon ${{ steps.swift-test.outcome }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| xcodebuild (iOS Sim) | $(icon ${{ steps.ios-build.outcome }}) |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.swift-build.outcome }}" = "failure" ] || \
+             [ "${{ steps.swift-test.outcome }}" = "failure" ] || \
+             [ "${{ steps.ios-build.outcome }}" = "failure" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**One or more steps failed.** Check the logs above." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
